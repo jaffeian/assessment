@@ -1,101 +1,105 @@
-module "aws_vpc" {
-  source          = "github.com/jaffeian/assessment.git"
-
-  infra_env = var.infra_env
-}
-
-# Create VPC
+# Create a VPC
 resource "aws_vpc" "main" {
-  cidr_block = "10.0.0.0/16"
+  cidr_block = "${var.vpc_cidr}"
   
     tags = {
     Name = "ianjaffe-vpc"
-    Environment = var.infra_env
   }
 }
 
-resource "aws_subnet" "public" {
-  for_each = var.public_subnet_numbers
- 
-  vpc_id            = aws_vpc.vpc.id
-  availability_zone = each.key
- 
-  # 2,048 IP addresses each
-  cidr_block = cidrsubnet(aws_vpc.vpc.cidr_block, 4, each.value)
- 
-  tags = {
-    Name        = "cloudcasts-${var.infra_env}-public-subnet"
-    Project     = "cloudcasts.io"
-    Role        = "public"
-    Environment = var.infra_env
-    ManagedBy   = "terraform"
-    Subnet      = "${each.key}-${each.value}"
-  }
-}
- 
-# Create 1 private subnets for each AZ within the regional VPC
-resource "aws_subnet" "private" {
-  for_each = var.private_subnet_numbers
- 
-  vpc_id            = aws_vpc.vpc.id
-  availability_zone = each.key
- 
-  # 2,048 IP addresses each
-  cidr_block = cidrsubnet(aws_vpc.vpc.cidr_block, 4, each.value)
- 
-  tags = {
-    Name        = "cloudcasts-${var.infra_env}-private-subnet"
-    Project     = "cloudcasts.io"
-    Role        = "private"
-    Environment = var.infra_env
-    ManagedBy   = "terraform"
-    Subnet      = "${each.key}-${each.value}"
-  }
+# Create public and private subnets
+resource "aws_subnet" "public_subnet_1a" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = var.public_subnet_number_1a
+  availability_zone = "us-east-1a"
 }
 
-# Create EKS
-resource "aws_eks_cluster" "eks" {
-  name     = "eks"
-  role_arn = aws_iam_role.eks.arn
-  version  = "1.21"
+resource "aws_subnet" "public_subnet_1b" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = var.public_subnet_number_1b
+  availability_zone = "us-east-1b"
+}
 
-  # Ensure that IAM Role permissions are created before and deleted after EKS Cluster handling.
-  # Otherwise, EKS will not be able to properly delete EKS managed EC2 infrastructure such as Security Groups.
+resource "aws_subnet" "private_subnet_1a" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = var.private_subnet_number_1a
+  availability_zone = "us-east-1a"
+}
+
+resource "aws_subnet" "private_subnet_1b" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = var.private_subnet_number_1b
+  availability_zone = "us-east-1b"
+}
+
+# EKS
+resource "aws_iam_role" "EKSClusterRole" {
+  name = "EKSClusterRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_eks_cluster" "ekscluster" {
+  name     = "ekscluster"
+  role_arn = aws_iam_role.EKSClusterRole.arn
+
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.public_subnet_1a.id, 
+      aws_subnet.public_subnet_1b.id, 
+      aws_subnet.private_subnet_1a.id, 
+      aws_subnet.private_subnet_1b.id]
+  }
+
   depends_on = [
-    aws_iam_role_policy_attachment.AmazonEKSClusterPolicy
+    aws_iam_role_policy_attachment.ekscluster-AmazonEKSClusterPolicy,
+    aws_iam_role_policy_attachment.ekscluster-AmazonEKSVPCResourceController,
   ]
 }
 
-output "endpoint" {
-  value = aws_eks_cluster.eks.endpoint
-}
+data "aws_iam_policy_document" "assume_role" {
+  statement {
+    effect = "Allow"
 
-output "kubeconfig-certificate-authority-data" {
-  value = aws_eks_cluster.eks.certificate_authority[0].data
-}
+    principals {
+      type        = "Service"
+      identifiers = ["eks.amazonaws.com"]
+    }
 
-data "aws_ami" "ubuntu" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+    actions = ["sts:AssumeRole"]
   }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  owners = ["amazon"] # Canonical
 }
 
-# Create EC2 instance as an EKS worker node
+resource "aws_iam_role" "ekscluster" {
+  name               = "eks-cluster-ekscluster"
+  assume_role_policy = data.aws_iam_policy_document.assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ekscluster-AmazonEKSClusterPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.ekscluster.name
+}
+
+resource "aws_iam_role_policy_attachment" "ekscluster-AmazonEKSVPCResourceController" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
+  role       = aws_iam_role.ekscluster.name
+}
+
 resource "aws_eks_node_group" "node-ec2" {
-  cluster_name    = aws_eks_cluster.eks-cluster.name
+  cluster_name    = aws_eks_cluster.ekscluster.name
   node_group_name = "t3_micro-node_group"
   node_role_arn   = aws_iam_role.NodeGroupRole.arn
-  subnet_ids      = flatten( module.aws_vpc.private_subnets_id )
+  subnet_ids      = [aws_subnet.private_subnet_1a.id]
 
   scaling_config {
     desired_size = 2
@@ -115,23 +119,6 @@ resource "aws_eks_node_group" "node-ec2" {
   ]
 }
 
-# Create IAM Roles for EKS Cluster and Node Group
-resource "aws_iam_role" "EKSClusterRole" {
-  name = "EKSClusterRole"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "eks.amazonaws.com"
-        }
-      },
-    ]
-  })
-}
-
 resource "aws_iam_role" "NodeGroupRole" {
   name = "EKSNodeGroupRole"
   assume_role_policy = jsonencode({
@@ -148,31 +135,57 @@ resource "aws_iam_role" "NodeGroupRole" {
   })
 }
 
-# Create container with web interface
-resource "aws_instance" "web" {
-  ami           = data.aws_ami.ubuntu.id
-  instance_type = "t3.micro"
+resource "aws_iam_role_policy_attachment" "AmazonEKSWorkerNodePolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.NodeGroupRole.name
+}
 
-  tags = {
-    Name = "HelloWorld"
-  }
+resource "aws_iam_role_policy_attachment" "AmazonEC2ContainerRegistryReadOnly" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.NodeGroupRole.name
+}
+
+resource "aws_iam_role_policy_attachment" "AmazonEKS_CNI_Policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.NodeGroupRole.name
+}
+
+# Container with a web interface
+resource "aws_instance" "web_instance" {
+  ami           = "ami-0557a15b87f6559cf"
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public_subnet_1a.id
+
+  user_data = <<-EOF
+              #!/bin/bash
+              # Install Apache and host a simple website
+              yum update -y
+              yum install -y httpd
+              service httpd start
+              chkconfig httpd on
+              echo "Hello, Terraform!" > /var/www/html/index.html
+              EOF
 }
 
 # Create load balancer that exposes the web interface of the container
+resource "aws_internet_gateway" "gateway" {
+  vpc_id = aws_vpc.main.id
+}
+
 resource "aws_lb" "sh_lb" {
   name               = "ianjaffe-lb-asg"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.sh_sg_for_elb.id]
-  subnets            = [aws_subnet.sh_subnet_1.id, aws_subnet.sh_subnet_1a.id]
-  depends_on         = [aws_internet_gateway.sh_gw]
+  subnets            = [aws_subnet.public_subnet_1a.id, aws_subnet.public_subnet_1b.id]
+  depends_on         = [aws_internet_gateway.gateway]
 }
 
 resource "aws_lb_target_group" "sh_alb_tg" {
   name     = "sh-tf-lb-alb-tg"
   port     = 80
   protocol = "HTTP"
-  vpc_id   = aws_vpc.sh_main.id
+  vpc_id   = aws_vpc.main.id
 }
 
 resource "aws_lb_listener" "sh_front_end" {
@@ -186,8 +199,9 @@ resource "aws_lb_listener" "sh_front_end" {
 }
 
 resource "aws_security_group" "sh_sg_for_elb" {
+  
   name   = "ianjaffe-sg_for_elb"
-  vpc_id = aws_vpc.sh_main.id
+  vpc_id = aws_vpc.main.id
   
   ingress {
     description      = "Allow http request from anywhere"
@@ -213,12 +227,11 @@ resource "aws_security_group" "sh_sg_for_elb" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
 }
 
 resource "aws_security_group" "sh_sg_for_ec2" {
   name   = "ianjaffe-sg_for_ec2"
-  vpc_id = aws_vpc.sh_main.id
+  vpc_id = aws_vpc.main.id
 
   ingress {
     description     = "Allow http request from Load Balancer"
