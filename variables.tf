@@ -13,7 +13,7 @@ variable "public_subnet_number_1a" {
     description = "Public subnet cidr"
     default = "10.0.64.0/19"
 }
- 
+
 variable "public_subnet_number_1b" {
     type = string
     description = "Public subnet cidr"
