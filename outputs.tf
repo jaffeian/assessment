@@ -17,3 +17,16 @@ output "private_subnet_1a" {
 output "private_subnet_1b" {
     value = aws_subnet.private_subnet_1b.cidr_block
 }
+
+output "load_balancer_dns_name" {
+    value = aws_lb.front.dns_name
+}
+
+output "web_instance_id" {
+    value = aws_instance.web_instance.id
+}
+
+output "eks_cluster_name" {
+    value = aws_eks_cluster.ekscluster.name
+}
+
